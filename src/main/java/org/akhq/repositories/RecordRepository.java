@@ -1011,6 +1011,9 @@ public class RecordRepository extends AbstractRepository {
             }}
         );
 
+        Map<Integer, Long> maxOffsets =  fromTopic.getPartitions().stream()
+                                                    .collect(Collectors.toMap(Partition::getId, Partition::getLastOffset));
+
         Map<TopicPartition, Long> partitions = getTopicPartitionForSortOldest(fromTopic, options, consumer);
 
         Map<TopicPartition, Long> filteredPartitions = partitions.entrySet().stream()
@@ -1039,29 +1042,39 @@ public class RecordRepository extends AbstractRepository {
 
             KafkaProducer<byte[], byte[]> producer = kafkaModule.getProducer(toClusterId);
             ConsumerRecords<byte[], byte[]> records;
+            List<Integer> partitionsToCopy = filteredPartitions.keySet().stream().map(TopicPartition::partition)
+                                                             .collect(Collectors.toList());
             do {
                 records = this.poll(consumer);
                 for (ConsumerRecord<byte[], byte[]> record : records) {
-                    System.out.println(record.offset() + "-" + record.partition());
-
-                    counter++;
-                    producer.send(new ProducerRecord<>(
-                        toTopic.getName(),
-                        samePartition ? record.partition() : null,
-                        record.timestamp(),
-                        record.key(),
-                        record.value(),
-                        record.headers()
-                    ));
+                    if(record.offset() <= getPartionMaxOffset(maxOffsets, record)) {
+                        log.info("copy " + record.offset() + "-" + record.partition());
+                        counter++;
+                        producer.send(new ProducerRecord<>(
+                            toTopic.getName(),
+                            samePartition ? record.partition() : null,
+                            record.timestamp(),
+                            record.key(),
+                            record.value(),
+                            record.headers()
+                        ));
+                    } else {
+                        partitionsToCopy.remove(record.partition());
+                        log.info("skip copy " + record.offset() + "-" + record.partition());
+                    }
                 }
 
-            } while (!records.isEmpty());
+            } while (!partitionsToCopy.isEmpty());
 
             producer.flush();
         }
         consumer.close();
 
         return new CopyResult(counter);
+    }
+
+    private static Long getPartionMaxOffset(Map<Integer, Long> maxOffsets, ConsumerRecord<byte[], byte[]> record) {
+        return maxOffsets.getOrDefault(record.partition(), Long.MIN_VALUE);
     }
 
     @ToString
